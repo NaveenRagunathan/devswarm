@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: devswarm-backend
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      # Add other environment variables from your .env file here
+      # - key: DATABASE_URL
+      #   fromDatabase:
+      #     name: devswarm-db
+      #     property: connectionString
+    plan: free
+
+  - type: static_site
+    name: devswarm-frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://devswarm-backend.onrender.com  # Update this after backend is deployed
+    plan: free
+
+# Uncomment and configure this if you need a PostgreSQL database
+# databases:
+#   - name: devswarm-db
+#     plan: free
