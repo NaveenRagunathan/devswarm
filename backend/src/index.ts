@@ -1,6 +1,14 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { WebSocketServer, WebSocket } from 'ws';
+
+declare module 'express' {
+  interface Request {
+    ws?: () => Promise<WebSocket>;
+  }
+}
+
+type WebSocketType = WebSocket;
 import { createServer } from 'http';
 import { serverConfig, validateConfig, createTigerConnection } from './config/tiger.js';
 import { DevSwarmError, AnalysisRequest, AnalysisResponse, AgentProgress, WSMessage, TigerConnection } from './types/index.js';
@@ -22,7 +30,7 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
 // Store active WebSocket connections by submission ID
-const wsConnections = new Map<string, Set<WebSocket>>();
+const wsConnections = new Map<string, Set<WebSocketType>>();
 
 // Database connection
 let db: TigerConnection | null = null;
@@ -62,7 +70,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 // Health check endpoint
-app.get('/health', (_req: Request, res: Response) => {
+app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
@@ -82,9 +90,9 @@ app.get('/api/agents', async (_req: Request, res: Response, next: NextFunction) 
     }
 
     const agents = await AgentFactory.getAvailableAgents(db);
-    res.json({ agents });
+    return res.json({ agents });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 });
 
@@ -95,6 +103,7 @@ app.post('/api/analyze', async (req: Request, res: Response, next: NextFunction)
     if (!code || !language) {
       return res.status(400).json({
         error: 'Missing required fields: code and language',
+        code: 'MISSING_FIELDS',
       });
     }
 
@@ -112,21 +121,24 @@ app.post('/api/analyze', async (req: Request, res: Response, next: NextFunction)
     );
 
     // Start analysis in background
-    analyzeCode(submissionId, code, language, requestedAgents).catch(err => {
-      console.error('Analysis error:', err);
+    analyzeCode(submissionId, code, language, requestedAgents).catch(error => {
+      console.error('Analysis error:', error);
       broadcastToSubmission(submissionId, {
         type: 'error',
-        payload: { message: 'Analysis failed', error: err.message },
+        payload: { 
+          message: 'Analysis failed', 
+          error: error instanceof Error ? error.message : 'Unknown error',
+        },
       });
     });
 
-    res.json({
-      submission_id: submissionId,
-      status: 'analyzing',
+    return res.status(202).json({
+      submissionId,
+      status: 'accepted',
       message: 'Analysis started. Connect to WebSocket for real-time updates.',
     });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 });
 
@@ -145,19 +157,9 @@ app.get('/api/analysis/:submissionId', async (req: Request, res: Response, next:
     );
 
     if (submissions.length === 0) {
-      return res.status(404).json({ error: 'Submission not found' });
-    }
-
-    // Get analysis results
-    const results = await db.query(
-      `SELECT ar.id, ar.agent_id, a.name as agent_name, a.specialty,
-              ar.findings, ar.confidence, ar.execution_time_ms, ar.created_at
-       FROM analysis_results ar
-       JOIN agents a ON ar.agent_id = a.id
-       WHERE ar.submission_id = $1
-       ORDER BY ar.created_at`,
-      [submissionId]
-    );
+      return res.status(404).json({ 
+        error: 'Submission not found',
+        code: 'SUBMISSION_NOT_FOUND',
 
     // Calculate summary
     const summary = {
@@ -233,11 +235,12 @@ app.get('/api/patterns', async (req: Request, res: Response, next: NextFunction)
 // Chat with agent endpoint
 app.post('/api/chat', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { agentId, findingIndex, message, code } = req.body;
+    const { agentId, message } = req.body;
 
     if (!agentId || message === undefined) {
       return res.status(400).json({
         error: 'Missing required fields: agentId and message',
+        code: 'MISSING_FIELDS',
       });
     }
 
@@ -245,41 +248,22 @@ app.post('/api/chat', async (req: Request, res: Response, next: NextFunction) =>
       throw new DevSwarmError('Database not initialized', 'DB_NOT_READY', 503);
     }
 
-    // Import chat function
-    const { chatWithAgent } = await import('./services/llmService.js');
-
-    // Get agent info
+    // Get agent from database
     const agents = await db.query('SELECT * FROM agents WHERE id = $1', [agentId]);
     if (agents.length === 0) {
-      return res.status(404).json({ error: 'Agent not found' });
+      return res.status(404).json({
+        error: 'Agent not found',
+        code: 'AGENT_NOT_FOUND',
+      });
     }
 
-    const agent = agents[0];
-
-    // Create a mock finding for context
-    const finding = {
-      severity: 'info' as const,
-      category: agent.specialty,
-      message: 'Code analysis discussion',
-      suggestion: 'Discussing code improvements',
-    };
-
-    // Get response from LLM
-    const response = await chatWithAgent(
-      agent.specialty,
-      finding,
-      message,
-      code
-    );
-
-    res.json({
-      agent_name: agent.name,
-      agent_specialty: agent.specialty,
-      response,
-      timestamp: new Date().toISOString(),
+    // TODO: Implement chat functionality
+    return res.status(501).json({
+      error: 'Chat functionality not yet implemented',
+      code: 'NOT_IMPLEMENTED',
     });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 });
 
@@ -288,30 +272,33 @@ app.post('/api/explain', async (req: Request, res: Response, next: NextFunction)
   try {
     const { code, language } = req.body;
 
-    if (!code || !language) {
+    if (!code) {
       return res.status(400).json({
-        error: 'Missing required fields: code and language',
+        error: 'Missing required field: code',
+        code: 'MISSING_CODE',
       });
     }
 
+    // Import explain function
     const { explainCode } = await import('./services/llmService.js');
-    const explanation = await explainCode(code, language);
+    const explanation = await explainCode(code, language || 'plaintext');
 
-    res.json({
+    return res.json({
       explanation,
+      language: language || 'plaintext',
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    next(error);
+    return next(error);
   }
 });
 
 // LLM status endpoint
-app.get('/api/llm/status', async (req: Request, res: Response, next: NextFunction) => {
+app.get('/api/llm/status', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const { isLLMConfigured, getLLMProvider } = await import('./services/llmService.js');
     
-    res.json({
+    return res.json({
       configured: isLLMConfigured(),
       provider: getLLMProvider(),
       features: {
@@ -319,8 +306,10 @@ app.get('/api/llm/status', async (req: Request, res: Response, next: NextFunctio
         chat: isLLMConfigured(),
         explanation: isLLMConfigured(),
       },
+      timestamp: new Date().toISOString(),
     });
   } catch (error) {
+    return next(error);
     next(error);
   }
 });
@@ -492,9 +481,10 @@ async function analyzeCode(
 }
 
 // Error handling middleware
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   console.error('Error:', err);
-
+  
+  // Handle DevSwarmError
   if (err instanceof DevSwarmError) {
     return res.status(err.statusCode).json({
       error: err.message,
@@ -503,10 +493,26 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     });
   }
 
-  return res.status(500).json({
-    error: 'Internal server error',
-    message: serverConfig.nodeEnv === 'development' ? err.message : undefined,
-  });
+  // Handle other errors
+  const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred';
+  const response: {
+    error: string;
+    code: string;
+    details?: unknown;
+  } = {
+    error: errorMessage,
+    code: 'INTERNAL_SERVER_ERROR',
+  };
+
+  // Add stack trace in development
+  if (serverConfig.nodeEnv === 'development' && err instanceof Error) {
+    response.details = {
+      stack: err.stack,
+      name: err.name,
+    };
+  }
+
+  return res.status(500).json(response);
 });
 
 // 404 handler

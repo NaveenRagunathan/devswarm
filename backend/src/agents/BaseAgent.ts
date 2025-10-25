@@ -39,12 +39,13 @@ export abstract class BaseAgent {
    * Perform hybrid search using text and semantic similarity
    */
   protected async hybridSearch(
-    codeSnippet: string,
+    _codeSnippet: string,
     language: string,
     limit: number = 5
   ): Promise<HybridSearchResult[]> {
     // TODO: Implement embedding-based search when pgvector is available
     // For now, use text-based search
+    // Using _codeSnippet as a parameter name to indicate it's intentionally unused for now
     const query = `
       SELECT 
         id, pattern_text, category, severity, description, language, example_fix, created_at,
